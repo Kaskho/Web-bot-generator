@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: {{ service_name }}
+    env: docker
+    plan: free
+    healthCheck:
+      path: /health
