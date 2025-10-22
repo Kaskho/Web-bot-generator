@@ -1,0 +1,85 @@
+{% if role is none %}
+# sidekick_main.py - simple webhook for sidekick
+import os, logging, time
+from flask import Flask, request, abort
+import telebot
+from sidekick_logic import SidekickLogic
+from config import Config
+from waitress import serve
+
+logging.basicConfig(level=logging.INFO)
+app = Flask(__name__)
+BOT_TOKEN = Config.SIDEKICK_BOT_TOKEN()
+if not BOT_TOKEN:
+    logging.critical("SIDEKICK_BOT_TOKEN not set")
+bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
+logic = SidekickLogic(bot)
+
+@app.route(f'/{BOT_TOKEN}', methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return "OK",200
+    else:
+        abort(403)
+
+@app.route('/health', methods=['GET'])
+def health():
+    return "",204
+
+if __name__ == '__main__':
+    try:
+        WEBHOOK_BASE = Config.WEBHOOK_BASE_URL()
+        if WEBHOOK_BASE:
+            bot.remove_webhook()
+            time.sleep(0.5)
+            bot.set_webhook(url=f"{WEBHOOK_BASE}/{BOT_TOKEN}")
+    except Exception as e:
+        logging.error(f"Webhook setup error: {e}")
+    serve(app, host="0.0.0.0", port=int(os.environ.get("PORT",10001)))
+{% else %}
+# sidekick_logic.py - minimal sidekick behavior
+import os, logging, random, time
+from config import Config
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class SidekickLogic:
+    def __init__(self, bot):
+        self.bot = bot
+        try:
+            import json
+            with open("bot_texts.json","r",encoding="utf-8") as f:
+                self.texts = json.load(f)
+        except Exception:
+            self.texts = {
+                "GREET_NEW_MEMBERS_HYPE": ["Welcome {name}, prepare for the moon!"],
+                "SCHEDULED_PUMP": ["PUMP IT!"],
+                "SCHEDULED_BUY": ["Buy the dip!"]
+            }
+        self._register_handlers()
+
+    def _register_handlers(self):
+        self.bot.message_handler(content_types=['new_chat_members'])(self.greet_new_members)
+        self.bot.message_handler(func=lambda m: True, content_types=['text'])(self.handle_all_text)
+
+    def greet_new_members(self, message):
+        try:
+            for member in message.new_chat_members:
+                name = getattr(member, 'first_name','fren')
+                self.bot.send_message(message.chat.id, random.choice(self.texts.get("GREET_NEW_MEMBERS_HYPE", [f"Welcome {name}!"])).format(name=name))
+        except Exception as e:
+            logger.error(f"greet_new_members error: {e}")
+
+    def handle_all_text(self, message):
+        text = (message.text or "").lower()
+        # Sidekick responds with hype when certain keywords appear
+        if any(k in text for k in ["buy","pump","moon","lfg","hodl"]):
+            self.bot.send_message(message.chat.id, random.choice(self.texts.get("SCHEDULED_PUMP",["PUMP IT!"])))
+        # else small banter
+        elif len(text) < 200:
+            self.bot.send_message(message.chat.id, random.choice(self.texts.get("GREET_NEW_MEMBERS_HYPE",["Nice to meet you, fren!"])))
+{% endif %}
