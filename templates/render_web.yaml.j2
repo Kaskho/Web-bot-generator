@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: {{ coin_name | lower | replace(' ', '-') }}-web
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements_web.txt"
+    startCommand: "uvicorn generator_app:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /
+    envVars:
+      - key: GROK_API_KEY
+        sync: false
+      - key: GROK_MODEL
+        value: llama3-8b-8192
