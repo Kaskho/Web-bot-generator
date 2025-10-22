@@ -1,0 +1,23 @@
+import os
+
+class Config:
+    @staticmethod
+    def BOT_TOKEN(): return os.environ.get("BOT_TOKEN")
+    @staticmethod
+    def SIDEKICK_BOT_TOKEN(): return os.environ.get("SIDEKICK_BOT_TOKEN")
+    @staticmethod
+    def WEBHOOK_BASE_URL(): return os.environ.get("WEBHOOK_BASE_URL","")
+    @staticmethod
+    def GROUP_CHAT_ID(): return os.environ.get("GROUP_CHAT_ID")
+    @staticmethod
+    def GROUP_OWNER_ID(): return os.environ.get("GROUP_OWNER_ID")
+    @staticmethod
+    def DATABASE_URL(): return os.environ.get("DATABASE_URL")
+    @staticmethod
+    def CONTRACT_ADDRESS(): return os.environ.get("CONTRACT_ADDRESS","")
+    @staticmethod
+    def PUMP_FUN_LINK(): return os.environ.get("PUMP_FUN_LINK","")
+    @staticmethod
+    def WEBSITE_URL(): return os.environ.get("WEBSITE_URL","")
+    @staticmethod
+    def TELEGRAM_URL(): return os.environ.get("TELEGRAM_URL","")
