@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: {{ coin_name | lower | replace(' ', '-') }}-sidekick
+    env: docker
+    plan: free
+    healthCheckPath: /
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: GROK_API_KEY
+        sync: false
+      - key: GROK_MODEL
+        value: llama3-8b-8192
+      - key: AI_REPLY_ENABLED
+        value: true
+      - key: ROLE
+        value: "SIDEKICK"
+      - key: MAIN_BOT_URL
+        value: "{{ main_bot_url }}"
+      - key: COIN_NAME
+        value: "{{ coin_name }}"
+      - key: TICKER
+        value: "{{ ticker }}"
+      - key: WEBSITE_URL
+        value: "{{ website_url }}"
+      - key: PUMP_FUN_LINK
+        value: "{{ pump_fun }}"
+      - key: TELEGRAM_URL
+        value: "{{ telegram_url }}"
+      - key: X_URL
+        value: "{{ x_url }}"
+      - key: CONNECTION_MODE
+        value: "LINKED"
