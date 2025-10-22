@@ -1,132 +1,134 @@
-# logic.py — Smart Sidekick Bot (AI Grok + Fallback, No Overlap with Main Bot)
-import os, json, random, time, logging, httpx, re
-from telebot.types import Message
-from config import Config
+# logic.py — Smart Sidekick with 20s Delay & MainBot Sync
+import os, json, random, time, logging, httpx, threading, re
+from flask import Flask, request
+from telebot import TeleBot
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class SidekickLogic:
-    def __init__(self, bot):
-        self.bot = bot
-        self.coin_name = os.environ.get("COIN_NAME", "NPEPE")
-        self.ticker = os.environ.get("TICKER", "NPEPE")
-        self.role = os.environ.get("ROLE", "SIDEKICK")
-        self.main_bot_url = os.environ.get("MAIN_BOT_URL", "")
-        self.ai_enabled = os.environ.get("AI_REPLY_ENABLED", "true").lower() == "true"
+app = Flask(__name__)
 
-        # Load fallback texts
-        try:
-            with open("bot_texts.json", "r", encoding="utf-8") as f:
-                self.texts = json.load(f)
-        except Exception:
-            self.texts = {
-                "HYPE": ["Let's amplify the chaos 🐸💥", "Meme power rising..."],
-                "WISDOM": ["Balance is for stablecoins, not memes.", "Sometimes silence is bullish."]
-            }
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+bot = TeleBot(BOT_TOKEN)
 
-        # AI settings
-        self.grok_url = os.environ.get("GROK_API_URL", "https://api.groq.ai/v1/chat/completions")
-        self.grok_key = os.environ.get("GROK_API_KEY", "")
-        self.grok_model = os.environ.get("GROK_MODEL", "llama3-8b-8192")
+AI_ENABLED = os.environ.get("AI_REPLY_ENABLED", "true").lower() == "true"
+GROK_API_KEY = os.environ.get("GROK_API_KEY", "")
+GROK_URL = os.environ.get("GROK_API_URL", "https://api.groq.ai/v1/chat/completions")
+GROK_MODEL = os.environ.get("GROK_MODEL", "llama3-8b-8192")
+COIN_NAME = os.environ.get("COIN_NAME", "NPEPE")
+ROLE = os.environ.get("ROLE", "SIDEKICK")
 
-        self.recent_main_replies = []  # cache to avoid overlapping
+# Cache pesan yang sudah dijawab main bot
+CACHE_FILE = "main_cache.json"
+if not os.path.exists(CACHE_FILE):
+    json.dump([], open(CACHE_FILE, "w"))
 
-        # Register handlers
-        self.register_handlers()
+try:
+    with open("bot_texts.json", "r", encoding="utf-8") as f:
+        TEXTS = json.load(f)
+except Exception:
+    TEXTS = {"HYPE": ["Let's go frog army!", "Swamp energy rising 🐸"], "WISDOM": ["Silence is bullish."]}
 
-    # =======================================================
-    def register_handlers(self):
-        self.bot.message_handler(content_types=["text"])(self.handle_text)
-        self.bot.message_handler(commands=["start", "help"])(self.cmd_start)
 
-    # =======================================================
-    def cmd_start(self, message: Message):
-        txt = f"🐸 {self.coin_name} Sidekick active — keeping the swamp alive."
-        self.bot.reply_to(message, txt)
+# ============= AI REPLY =============
+def ask_grok(user_input: str) -> str:
+    if not (AI_ENABLED and GROK_API_KEY):
+        return None
+    headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": GROK_MODEL,
+        "messages": [
+            {"role": "system", "content": f"You are {COIN_NAME}'s sidekick frog — funny, slightly sarcastic, reacts to chat vibe. Keep replies short and witty."},
+            {"role": "user", "content": user_input}
+        ],
+        "temperature": 0.9,
+        "max_tokens": 150
+    }
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            r = client.post(GROK_URL, json=payload, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+            return data["choices"][0]["message"]["content"]
+    except Exception as e:
+        logger.warning(f"[AI Offline] {e}")
+        return None
 
-    # =======================================================
-    def handle_text(self, message: Message):
-        text = message.text or ""
-        chat_id = message.chat.id
 
-        # --- Ignore messages from self or other bots
-        if message.from_user.is_bot:
-            return
+# ============= HANDLE CHAT =============
+@bot.message_handler(func=lambda m: not m.from_user.is_bot, content_types=["text"])
+def handle_message(msg):
+    threading.Thread(target=delayed_sidekick_reply, args=(msg,)).start()
 
-        # --- Ignore messages that the main bot already replied to
-        if self._is_replied_by_main(text):
-            logger.info(f"[Skip] Main bot already handled: {text[:30]}")
-            return
 
-        # --- Respond only if message has emotional or keyword triggers
-        if not self._is_trigger_message(text):
-            return
+def delayed_sidekick_reply(msg):
+    time.sleep(20)
+    text = msg.text.lower()
+    chat_id = msg.chat.id
 
-        # --- Add delay for realism
-        time.sleep(random.uniform(2.0, 4.0))
+    # Skip if this text is already handled by main bot
+    if _is_in_cache(text):
+        logger.info(f"[Skip] Main bot already replied: {text[:40]}")
+        return
 
-        # --- Attempt AI reply first
-        reply = None
-        if self.ai_enabled and self.grok_key:
-            reply = self.ask_grok(text)
+    # Only reply if message contains trigger words or emotion
+    if not _is_trigger(text):
+        return
 
-        if not reply:
-            reply = self._fallback_reply(text)
+    reply = ask_grok(text)
+    if not reply:
+        reply = _fallback(text)
 
-        # --- Send reply
-        if reply:
-            self.bot.send_message(chat_id, reply)
+    bot.send_message(chat_id, reply)
+    logger.info(f"[Sidekick Reply] {reply[:50]}")
 
-    # =======================================================
-    def _is_trigger_message(self, text: str) -> bool:
-        """Return True if text should trigger sidekick"""
-        triggers = ["when", "why", "what", "pump", "moon", "frog", "buy", "dump", "lol", "haha", "?"]
-        return any(t in text.lower() for t in triggers)
 
-    # =======================================================
-    def _is_replied_by_main(self, text: str) -> bool:
-        """Detect overlap by checking main bot reply cache"""
-        for recent in self.recent_main_replies:
-            if self._similar_text(text, recent):
-                return True
+def _is_trigger(text: str) -> bool:
+    triggers = ["why", "wen", "pump", "moon", "lol", "?", "buy", "frog"]
+    return any(t in text for t in triggers)
+
+
+def _is_in_cache(text: str) -> bool:
+    try:
+        cache = json.load(open(CACHE_FILE, "r"))
+        return any(t.lower() in text.lower() for t in cache)
+    except:
         return False
 
-    def _similar_text(self, a: str, b: str) -> bool:
-        """Rough similarity check (simple overlap threshold)"""
-        a, b = a.lower(), b.lower()
-        overlap = len(set(a.split()) & set(b.split()))
-        return overlap / max(1, len(set(a.split()))) > 0.5
 
-    # =======================================================
-    def ask_grok(self, user_input: str) -> str:
-        """Get Grok AI reply"""
-        headers = {"Authorization": f"Bearer {self.grok_key}", "Content-Type": "application/json"}
-        payload = {
-            "model": self.grok_model,
-            "messages": [
-                {"role": "system", "content": f"You are {self.coin_name}'s meme sidekick frog — supportive, funny, and reactive to the main bot. Keep replies short and witty."},
-                {"role": "user", "content": user_input}
-            ],
-            "temperature": 0.8,
-            "max_tokens": 150
-        }
-        try:
-            with httpx.Client(timeout=10.0) as client:
-                r = client.post(self.grok_url, json=payload, headers=headers)
-                r.raise_for_status()
-                data = r.json()
-                reply = data["choices"][0]["message"]["content"]
-                return reply.strip()
-        except Exception as e:
-            logger.warning(f"[AI offline] {e}")
-            return None
+def _fallback(text: str) -> str:
+    if re.search(r"pump|moon|buy", text, re.IGNORECASE):
+        return random.choice(TEXTS.get("HYPE", ["Let's gooo"]))
+    if "?" in text:
+        return random.choice(TEXTS.get("WISDOM", ["Patience, fren."]))
+    return random.choice(TEXTS.get("HYPE", ["Stay meme-motivated 🐸"]))
 
-    # =======================================================
-    def _fallback_reply(self, text: str) -> str:
-        """Simple fallback using keyword-based or random message"""
-        if re.search(r"pump|moon|buy", text, re.IGNORECASE):
-            return random.choice(self.texts.get("HYPE", ["Let's goooo!"]))
-        if "?" in text:
-            return random.choice(self.texts.get("WISDOM", ["Patience, fren..."]))
-        return random.choice(self.texts.get("HYPE", ["Stay based, meme soldier 🐸"]))
+
+# ============= CACHE ENDPOINT =============
+@app.route("/cache_message", methods=["POST"])
+def cache_message():
+    """Receive cache from main bot"""
+    data = request.get_json()
+    text = data.get("text", "")
+    if text:
+        cache = json.load(open(CACHE_FILE, "r"))
+        if text not in cache:
+            cache.append(text)
+            json.dump(cache[-100:], open(CACHE_FILE, "w"))  # keep last 100 entries
+            logger.info(f"[Cache added] {text[:40]}")
+    return {"status": "ok"}
+
+
+@app.route("/", methods=["GET"])
+def home():
+    return f"{COIN_NAME} Sidekick active."
+
+
+# ============= START BOT =============
+def run():
+    app.run(host="0.0.0.0", port=10000)
+
+
+if __name__ == "__main__":
+    threading.Thread(target=run).start()
+    bot.infinity_polling()
