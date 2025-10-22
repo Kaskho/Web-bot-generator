@@ -8,7 +8,7 @@
 <body>
   <div class="container">
     <h1>🐸 Meme Coin Code Generator</h1>
-    <form id="genForm" method="post" action="/generate" enctype="multipart/form-data">
+    <form id="genForm" enctype="multipart/form-data">
       <label>Coin Name:</label>
       <input type="text" name="coin_name" placeholder="NEXTPEPE" required>
 
@@ -18,46 +18,60 @@
       <label>Network:</label>
       <input type="text" name="network" value="Pump.fun">
 
-      <label>Narrative / Story:</label>
-      <textarea name="narrative" rows="10" placeholder="Write your meme coin story here..." required></textarea>
+      <label>Narrative:</label>
+      <textarea name="narrative" rows="8" placeholder="Describe your meme coin story..." required></textarea>
 
-      <label>Upload Media (optional image/video):</label>
+      <label>Upload Media:</label>
       <input type="file" name="file" accept="image/*,video/*">
 
-      <h3>Social Links</h3>
-      <label>X (Twitter) URL:</label>
+      <label>X (Twitter):</label>
       <input type="url" name="x_url" value="https://x.com/">
 
-      <label>Telegram URL:</label>
+      <label>Telegram:</label>
       <input type="url" name="telegram_url" value="https://t.me/">
 
-      <label>Pump.fun URL:</label>
+      <label>Pump.fun:</label>
       <input type="url" name="pump_fun" value="https://pump.fun/">
 
-      <button type="submit">🚀 Generate Project</button>
+      <div class="buttons">
+        <button id="previewBtn">👁 Preview Website</button>
+        <button id="generateBtn">🚀 Download ZIP</button>
+      </div>
     </form>
-
     <p id="status"></p>
   </div>
 
   <script>
   const form = document.getElementById("genForm");
-  form.addEventListener("submit", async e => {
+  const previewBtn = document.getElementById("previewBtn");
+  const genBtn = document.getElementById("generateBtn");
+  const status = document.getElementById("status");
+
+  previewBtn.addEventListener("click", async e => {
     e.preventDefault();
-    const status = document.getElementById("status");
-    status.innerText = "⏳ Generating project...";
+    status.innerText = "⏳ Generating preview...";
+    const data = new FormData(form);
+    const res = await fetch("/preview", { method: "POST", body: data });
+    if (!res.ok) { status.innerText = "❌ Error generating preview."; return; }
+    const html = await res.text();
+    const win = window.open("", "_blank");
+    win.document.write(html);
+    win.document.close();
+    status.innerText = "✅ Preview opened in new tab.";
+  });
+
+  genBtn.addEventListener("click", async e => {
+    e.preventDefault();
+    status.innerText = "⏳ Generating ZIP...";
     const data = new FormData(form);
     const res = await fetch("/generate", { method: "POST", body: data });
-    if (!res.ok) {
-      status.innerText = "❌ Error generating project.";
-      return;
-    }
+    if (!res.ok) { status.innerText = "❌ Error generating project."; return; }
     const blob = await res.blob();
     const a = document.createElement("a");
     a.href = window.URL.createObjectURL(blob);
     a.download = data.get("coin_name") + "_project.zip";
     a.click();
-    status.innerText = "✅ Downloaded!";
+    status.innerText = "✅ ZIP downloaded!";
   });
   </script>
 </body>
