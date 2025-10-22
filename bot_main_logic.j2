@@ -1,0 +1,104 @@
+{% if role == "main" %}
+# main.py - webhook server for main bot
+import os, logging, time
+from flask import Flask, request, abort
+import telebot
+from logic import BotLogic
+from config import Config
+from waitress import serve
+
+logging.basicConfig(level=logging.INFO)
+app = Flask(__name__)
+
+BOT_TOKEN = Config.BOT_TOKEN()
+if not BOT_TOKEN:
+    logging.critical("BOT_TOKEN not set in environment")
+bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
+logic = BotLogic(bot)
+
+@app.route(f'/{BOT_TOKEN}', methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return "OK", 200
+    else:
+        abort(403)
+
+@app.route('/health', methods=['GET'])
+def health():
+    # lightweight health check
+    return "", 204
+
+if __name__ == '__main__':
+    try:
+        WEBHOOK_BASE = Config.WEBHOOK_BASE_URL()
+        if WEBHOOK_BASE:
+            bot.remove_webhook()
+            time.sleep(0.5)
+            bot.set_webhook(url=f"{WEBHOOK_BASE}/{BOT_TOKEN}")
+    except Exception as e:
+        logging.error(f"Webhook setup error: {e}")
+    serve(app, host="0.0.0.0", port=int(os.environ.get("PORT",10000)))
+{% elif role == "main_logic" %}
+# logic.py - minimal logic for main bot
+import os, logging, random, time
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from config import Config
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class BotLogic:
+    def __init__(self, bot):
+        self.bot = bot
+        # load bot texts if available
+        try:
+            import json
+            with open("bot_texts.json", "r", encoding="utf-8") as f:
+                self.texts = json.load(f)
+        except Exception:
+            self.texts = {
+                "GREET_NEW_MEMBERS": ["Welcome, fren! LFG!"],
+                "HYPE": ["LFG!"],
+                "WISDOM": ["HODL and be kind."],
+            }
+
+        self._register_handlers()
+
+    def _register_handlers(self):
+        self.bot.message_handler(commands=['start','help'])(self.send_welcome)
+        self.bot.message_handler(content_types=['new_chat_members'])(self.greet_new_members)
+        self.bot.message_handler(func=lambda m: True, content_types=['text'])(self.handle_all_text)
+
+    def send_welcome(self, message):
+        txt = f"Welcome to {os.environ.get('COIN_NAME','NPEPE')} — {os.environ.get('TICKER','NPEPE')}. Use the buttons!"
+        kb = InlineKeyboardMarkup()
+        kb.add(InlineKeyboardButton("Website", url=os.environ.get("WEBSITE_URL","https://example.com")))
+        kb.add(InlineKeyboardButton("Buy", url=os.environ.get("PUMP_FUN_LINK","https://pump.fun/")))
+        try:
+            self.bot.reply_to(message, txt, reply_markup=kb)
+        except Exception as e:
+            logger.error(f"send_welcome error: {e}")
+
+    def greet_new_members(self, message):
+        try:
+            for member in message.new_chat_members:
+                name = getattr(member, 'first_name', 'fren')
+                self.bot.send_message(message.chat.id, random.choice(self.texts.get("GREET_NEW_MEMBERS", [f"Welcome {name}!"])))
+        except Exception as e:
+            logger.error(f"greet_new_members error: {e}")
+
+    def handle_all_text(self, message):
+        text = (message.text or "").lower()
+        if "contract" in text or "ca" in text:
+            self.bot.send_message(message.chat.id, f"Contract: `{os.environ.get('CONTRACT_ADDRESS','')}`", parse_mode="Markdown")
+            return
+        if "hype" in text or "pump" in text:
+            self.bot.send_message(message.chat.id, random.choice(self.texts.get("HYPE",["LFG!"])))
+            return
+        # fallback
+        if len(text) < 300:
+            self.bot.send_message(message.chat.id, random.choice(self.texts.get("WISDOM",["Stay diamond-handed."])))
+{% endif %}
