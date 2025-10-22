@@ -1,196 +1,60 @@
 # generator_app.py
-import os, io, zipfile, uuid, shutil, json, pathlib
+import os, io, zipfile, uuid, shutil, pathlib, json
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import StreamingResponse, JSONResponse
-from jinja2 import Template
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 import httpx
 from typing import Optional
 from datetime import datetime
 
-app = FastAPI()
-
-# ---------- Config ----------
-GROK_API_URL = os.environ.get("GROK_API_URL", "https://api.groq.ai/v1/chat/completions")
-GROK_API_KEY = os.environ.get("GROK_API_KEY", "")
-GITHUB_PUSH_ENABLED = os.environ.get("GITHUB_PUSH_ENABLED", "false").lower() == "true"
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-
-TMP_DIR = "/tmp/generator"
+BASE = pathlib.Path(__file__).parent
+TEMPLATE_DIR = BASE / "templates"
+TMP_DIR = BASE / "tmp"
 os.makedirs(TMP_DIR, exist_ok=True)
 
-# ---------- Helper: call Grok ----------
-def call_grok_system(narrative: str, task: str) -> str:
-    """
-    task: short description like "generate website copy", "generate bot responses"
-    """
+env = Environment(
+    loader=FileSystemLoader(str(TEMPLATE_DIR)),
+    autoescape=select_autoescape(["html", "j2"])
+)
+
+app = FastAPI()
+
+# Config via ENV
+GROK_API_URL = os.environ.get("GROK_API_URL", "https://api.groq.ai/v1/chat/completions")
+GROK_API_KEY = os.environ.get("GROK_API_KEY", "")
+GROK_MODEL = os.environ.get("GROK_MODEL", "llama3-8b-8192")
+
+def call_grok(narrative: str, task: str) -> str:
+    """Call Grok; if not configured, return a simple fallback text."""
     if not GROK_API_KEY:
-        # Fallback: simple heuristic
-        return f"# GROK_NOT_CONFIGURED\n{task}\n\n{narrative}"
-    headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type":"application/json"}
-    prompt = [
-        {"role": "system", "content": "You are Grok: generate code-ready content for meme coin website & telegram bot."},
-        {"role": "user", "content": f"Task: {task}\n\nNarrative:\n{narrative}"}
-    ]
-    payload = {"model":"llama3-8b-8192","messages":prompt, "temperature":0.2}
-    try:
-        r = httpx.post(GROK_API_URL, json=payload, headers=headers, timeout=30.0)
+        return f"[GROK_NOT_CONFIGURED]\nTask: {task}\n\nNarrative:\n{narrative}"
+    payload = {
+        "model": GROK_MODEL,
+        "messages": [
+            {"role": "system", "content": "You are Grok: generate copy & JSON arrays for website and Telegram bot based on narrative."},
+            {"role": "user", "content": f"Task: {task}\n\nNarrative:\n{narrative}"}
+        ],
+        "temperature": 0.25,
+        "max_tokens": 1200
+    }
+    headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
+    with httpx.Client(timeout=30.0) as client:
+        r = client.post(GROK_API_URL, json=payload, headers=headers)
         r.raise_for_status()
         data = r.json()
-        # NOTE: response parsing depends on Grok's schema. Here we attempt common fields:
-        return data.get("choices", [{}])[0].get("message", {}).get("content", "") or json.dumps(data)
-    except Exception as e:
-        return f"# GROK_ERROR\n{str(e)}\n\n{task}\n\n{narrative}"
-
-# ---------- Jinja templates (minimal examples) ----------
-INDEX_HTML_TPL = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>{{ coin_name }} — Launchpad</title>
-  <meta name="description" content="{{ tagline }}">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <style>
-    body{font-family:Inter,system-ui;display:flex;min-height:100vh;align-items:center;justify-content:center;background:#0b1020;color:#e6f2ff}
-    .card{max-width:900px;padding:24px;border-radius:16px;background:rgba(255,255,255,0.04);box-shadow:0 6px 24px rgba(2,6,23,0.6)}
-    h1{font-size:36px;margin-bottom:8px}
-    p.lead{opacity:.9}
-    .media{margin-top:16px}
-    .links a{display:inline-block;margin-right:12px;background:#0f1724;padding:8px 12px;border-radius:8px;text-decoration:none;color:#9be7a1}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h1>{{ coin_name }} <small>({{ ticker }})</small></h1>
-    <p class="lead">{{ intro }}</p>
-    <div class="media">
-      {% if image_path %}
-        <img src="{{ image_path }}" alt="hero" style="max-width:100%;border-radius:12px"/>
-      {% endif %}
-      {% if video_path %}
-        <video controls style="max-width:100%;border-radius:12px"><source src="{{ video_path }}"></video>
-      {% endif %}
-    </div>
-    <h3>Roadmap</h3>
-    <pre>{{ roadmap }}</pre>
-    <div class="links">
-      <a href="{{ pump_fun }}">Buy on Pump.fun</a>
-      <a href="{{ website_url }}">Website</a>
-      <a href="{{ x_url }}">X</a>
-      <a href="{{ telegram_url }}">Telegram</a>
-    </div>
-  </div>
-</body>
-</html>
-"""
-
-DOCKERFILE_PY = """FROM python:3.11-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-COPY . .
-CMD ["python3","main.py"]
-"""
-
-RENDER_YAML_SERVICE = """services:
-  - type: web
-    name: {service_name}
-    env: docker
-    plan: free
-    healthCheck:
-      path: /health
-"""
-
-REQUIREMENTS_PY = "Flask==3.0.3\npyTelegramBotAPI==4.15.4\nhttpx==0.27.0\nwaitress==3.0.0\npsycopg2-binary==2.9.9\n"
-
-# Bot templates (truncated, minimal but functional)
-BOT_MAIN_PY = '''import os, logging, time
-from flask import Flask, request, abort
-import telebot
-from logic import BotLogic
-from config import Config
-from waitress import serve
-logging.basicConfig(level=logging.INFO)
-app = Flask(__name__)
-bot = telebot.TeleBot(Config.BOT_TOKEN(), threaded=False)
-logic = BotLogic(bot)
-@app.route(f'/{Config.BOT_TOKEN()}', methods=['POST'])
-def webhook():
-    if request.headers.get('content-type')=='application/json':
-        json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
-        return "OK",200
-    else:
-        abort(403)
-@app.route('/health')
-def health(): return "",204
-if __name__=='__main__':
+    # Attempt to parse typical choice content
     try:
-        bot.remove_webhook()
-        bot.set_webhook(url=f"{Config.WEBHOOK_BASE_URL()}/{Config.BOT_TOKEN()}")
-    except Exception as e:
-        logging.error(e)
-    serve(app, host="0.0.0.0", port=int(os.environ.get("PORT",10000)))
-'''
+        return data.get("choices", [])[0].get("message", {}).get("content", "")
+    except Exception:
+        return json.dumps(data)
 
-BOT_LOGIC_PY = '''import random, logging, time
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-from config import Config
-logging.basicConfig(level=logging.INFO)
-class BotLogic:
-    def __init__(self, bot):
-        self.bot = bot
-        self.coin_name = os.environ.get("COIN_NAME","NPEPE")
-        self.ticker = os.environ.get("TICKER","NPEPE")
-    def greet(self, message):
-        txt = f"Welcome to {self.coin_name}! {self.ticker} — LFG!"
-        self.bot.reply_to(message, txt)
-'''
-
-CONFIG_PY = '''import os
-class Config:
-    @staticmethod
-    def BOT_TOKEN(): return os.environ.get("BOT_TOKEN")
-    @staticmethod
-    def WEBHOOK_BASE_URL(): return os.environ.get("WEBHOOK_BASE_URL","")
-    @staticmethod
-    def GROUP_CHAT_ID(): return os.environ.get("GROUP_CHAT_ID")
-    @staticmethod
-    def CONTRACT_ADDRESS(): return os.environ.get("CONTRACT_ADDRESS","")
-    @staticmethod
-    def PUMP_FUN_LINK(): return os.environ.get("PUMP_FUN_LINK","")
-    @staticmethod
-    def WEBSITE_URL(): return os.environ.get("WEBSITE_URL","")
-    @staticmethod
-    def TELEGRAM_URL(): return os.environ.get("TELEGRAM_URL","")
-'''
-
-# ---------- Generator core ----------
-def render_website_files(context, outdir):
-    (pathlib.Path(outdir)/"website").mkdir(parents=True, exist_ok=True)
-    idx = Template(INDEX_HTML_TPL).render(**context)
-    open(pathlib.Path(outdir)/"website"/"index.html","w",encoding="utf-8").write(idx)
-    # copy media if provided
-    if context.get("image_filename"):
-        shutil.copy(context["image_filename"], pathlib.Path(outdir)/"website"/pathlib.Path(context["image_filename"]).name)
-
-def render_bot_files(context, outdir, kind="main"):
-    folder = pathlib.Path(outdir)/f"bot_{kind}"
-    folder.mkdir(parents=True, exist_ok=True)
-    open(folder/"Dockerfile","w").write(DOCKERFILE_PY)
-    open(folder/"requirements.txt","w").write(REQUIREMENTS_PY)
-    open(folder/"render.yaml","w").write(RENDER_YAML_SERVICE.format(service_name=f"npepe-{kind}"))
-    open(folder/"config.py","w").write(CONFIG_PY)
-    open(folder/"main.py","w").write(BOT_MAIN_PY)
-    open(folder/"logic.py","w").write(BOT_LOGIC_PY)
-
-def make_zip(source_dir):
+def make_zip(folder_path: pathlib.Path) -> io.BytesIO:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for root, dirs, files in os.walk(source_dir):
+        for root, dirs, files in os.walk(folder_path):
             for f in files:
                 full = os.path.join(root, f)
-                arc = os.path.relpath(full, source_dir)
+                arc = os.path.relpath(full, folder_path)
                 zf.write(full, arc)
     buf.seek(0)
     return buf
@@ -198,48 +62,97 @@ def make_zip(source_dir):
 @app.post("/generate")
 async def generate(
     narrative: str = Form(...),
-    coin_name: str = Form("NEXTPEPE"),
-    ticker: str = Form("NPEPE"),
-    pump_fun: Optional[str] = Form("https://pump.fun/"),
+    coin_name: str = Form(...),
+    ticker: str = Form(...),
+    network: str = Form("Pump.fun"),
     x_url: Optional[str] = Form("https://x.com/"),
     telegram_url: Optional[str] = Form("https://t.me/"),
+    pump_fun: Optional[str] = Form("https://pump.fun/"),
     file: Optional[UploadFile] = File(None)
 ):
     uid = str(uuid.uuid4())[:8]
-    work = pathlib.Path(TMP_DIR)/f"gen_{uid}"
-    if work.exists(): shutil.rmtree(work)
+    work = TMP_DIR / f"gen_{uid}"
+    if work.exists():
+        shutil.rmtree(work)
     work.mkdir(parents=True)
-    # Save upload if any
-    image_path = None
+
+    # save uploaded media if any
+    media_folder = work / "website" / "media"
+    media_folder.mkdir(parents=True, exist_ok=True)
+    media_filename = ""
     if file:
         ext = pathlib.Path(file.filename).suffix
-        save_to = work / f"media{ext}"
+        save_to = media_folder / f"media{ext}"
         content = await file.read()
-        open(save_to,"wb").write(content)
-        image_path = str(save_to)
-    # Use Grok to produce website copy and bot replies
-    site_copy = call_grok_system(narrative, "generate website intro, tagline, roadmap (short) in plain text")
-    bot_texts = call_grok_system(narrative, "generate arrays of bot short replies: GREET_NEW_MEMBERS, HYPE, WISDOM, SCHEDULED_BUY in JSON")
-    # Context for templates
-    context = {
-        "coin_name": coin_name,
-        "ticker": ticker,
-        "tagline": site_copy.splitlines()[0] if site_copy else "",
-        "intro": site_copy,
-        "roadmap": site_copy,
-        "pump_fun": pump_fun,
-        "x_url": x_url,
-        "telegram_url": telegram_url,
-        "website_url": f"https://{coin_name.lower().replace(' ','-')}.example.app",
-        "image_path": pathlib.Path(image_path).name if image_path else ""
-    }
-    # render
-    render_website_files(context, str(work))
-    render_bot_files(context, str(work), kind="main")
-    render_bot_files(context, str(work), kind="sidekick")
-    # write bot_texts as json for logic use
-    open(pathlib.Path(work)/"bot_texts.json","w",encoding="utf-8").write(bot_texts)
-    # zip
-    z = make_zip(str(work))
-    # optionally push to github: omitted here for security/complexity (can be added)
-    return StreamingResponse(z, media_type="application/zip", headers={"Content-Disposition":f"attachment; filename=generated_{coin_name}_{uid}.zip"})
+        open(save_to, "wb").write(content)
+        media_filename = f"media/{save_to.name}"
+
+    # Use Grok to create website copy and bot texts
+    site_copy = call_grok(narrative, "Generate: short tagline, intro paragraph, and roadmap in plain text")
+    bot_json = call_grok(narrative, "Generate: JSON object with arrays: GREET_NEW_MEMBERS, HYPE, WISDOM, SCHEDULED_BUY, SCHEDULED_PUMP. Return valid JSON only.")
+    # Try parse bot_json
+    try:
+        bot_texts = json.loads(bot_json.strip())
+    except Exception:
+        # Fallback: simple canned arrays
+        bot_texts = {
+            "GREET_NEW_MEMBERS": [f"Welcome to {coin_name}, fren! LFG!"],
+            "HYPE": ["LFG! To the moon!"],
+            "WISDOM": ["HODL and stay based."],
+            "SCHEDULED_BUY": ["Buy the dip!"],
+            "SCHEDULED_PUMP": ["PUMP IT!"]
+        }
+
+    # Render website template
+    tpl = env.get_template("website_index.j2")
+    index_html = tpl.render(
+        coin_name=coin_name,
+        ticker=ticker,
+        network=network,
+        tagline=(site_copy.splitlines()[0] if site_copy else ""),
+        intro=site_copy,
+        roadmap=site_copy,
+        pump_fun=pump_fun,
+        x_url=x_url,
+        telegram_url=telegram_url,
+        media_filename=media_filename
+    )
+    website_dir = work / "website"
+    website_dir.mkdir(parents=True, exist_ok=True)
+    (website_dir / "index.html").write_text(index_html, encoding="utf-8")
+    # Add Dockerfile & requirements & render.yaml from templates
+    for tname in ("dockerfile.j2", "requirements_bot.txt", "render_yaml.j2"):
+        if (TEMPLATE_DIR / tname).exists():
+            content = env.get_template(tname).render(service_name=f"{coin_name.lower().replace(' ','-')}-website")
+            (website_dir / (tname.replace(".j2","").replace("_bot",""))).write_text(content, encoding="utf-8")
+
+    # Create bot_main folder
+    bot_main_dir = work / "bot_main"
+    bot_main_dir.mkdir(parents=True, exist_ok=True)
+    # config
+    cfg = env.get_template("bot_config.j2").render()
+    (bot_main_dir / "config.py").write_text(cfg, encoding="utf-8")
+    # main.py (webhook server)
+    (bot_main_dir / "main.py").write_text(env.get_template("bot_main_logic.j2").render(role="main"), encoding="utf-8")
+    (bot_main_dir / "logic.py").write_text(env.get_template("bot_main_logic.j2").render(role="main_logic"), encoding="utf-8")
+    (bot_main_dir / "Dockerfile").write_text(env.get_template("dockerfile.j2").render(), encoding="utf-8")
+    (bot_main_dir / "requirements.txt").write_text(env.get_template("requirements_bot.txt").render(), encoding="utf-8")
+    (bot_main_dir / "render.yaml").write_text(env.get_template("render_yaml.j2").render(service_name=f"{coin_name.lower().replace(' ','-')}-bot-main"), encoding="utf-8")
+    (bot_main_dir / "bot_texts.json").write_text(json.dumps(bot_texts, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # Create bot_sidekick folder (similar)
+    bot_sk_dir = work / "bot_sidekick"
+    bot_sk_dir.mkdir(parents=True, exist_ok=True)
+    (bot_sk_dir / "config.py").write_text(cfg.replace("BOT_TOKEN","SIDEKICK_BOT_TOKEN").replace("WEBHOOK_BASE_URL","WEBHOOK_BASE_URL"), encoding="utf-8")
+    (bot_sk_dir / "sidekick_main.py").write_text(env.get_template("bot_sidekick_logic.j2").render(), encoding="utf-8")
+    (bot_sk_dir / "sidekick_logic.py").write_text(env.get_template("bot_sidekick_logic.j2").render(role="sidekick_logic"), encoding="utf-8")
+    (bot_sk_dir / "Dockerfile").write_text(env.get_template("dockerfile.j2").render(), encoding="utf-8")
+    (bot_sk_dir / "requirements.txt").write_text(env.get_template("requirements_bot.txt").render(), encoding="utf-8")
+    (bot_sk_dir / "render.yaml").write_text(env.get_template("render_yaml.j2").render(service_name=f"{coin_name.lower().replace(' ','-')}-bot-sidekick"), encoding="utf-8")
+    (bot_sk_dir / "bot_texts.json").write_text(json.dumps(bot_texts, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # Zip
+    zipbuf = make_zip(work)
+    filename = f"generated_{coin_name}_{uid}.zip"
+    headers = {"Content-Disposition": f"attachment; filename={filename}"}
+    return StreamingResponse(zipbuf, media_type="application/zip", headers=headers)
